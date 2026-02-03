@@ -6,6 +6,10 @@ This repository starts with a minimal MCP (Model Context Protocol) server scaffo
 
 - `healthcheck()` -> returns `ok`
 - `search_documents(...)` -> searches documents in Paperless with optional filters
+- `get_document(document_id)` -> fetches a single document by ID
+- `upload_document(file_path, metadata=None, filename=None)` -> uploads a document to Paperless
+- `update_document(document_id, updates)` -> updates metadata for an existing document
+- `create_lookup(lookup_type, data, parent_id=None, match=None, matching_algorithm=None, auto_match=True, permissions=None)` -> creates a tag/document type/correspondent/storage path/custom field
 - `list_lookups(include=None, fields=None, refresh=false)` -> returns tags, document types, correspondents, storage paths, and custom fields
 
 ## Requirements
@@ -86,6 +90,30 @@ MCP_REMOTE_LOOKUPS_FIELDS=id,name
 MCP_REMOTE_LOOKUPS_REFRESH=true
 ```
 
+Optional upload test variables (file path must exist on the server host):
+
+```bash
+MCP_REMOTE_UPLOAD_FILE=/path/on/server/invoice.pdf
+MCP_REMOTE_UPLOAD_FILENAME=invoice.pdf
+MCP_REMOTE_UPLOAD_TITLE=Invoice 2026-01
+MCP_REMOTE_UPLOAD_TAGS=1,2
+MCP_REMOTE_UPLOAD_DOCUMENT_TYPE=3
+MCP_REMOTE_UPLOAD_CORRESPONDENT=7
+MCP_REMOTE_UPLOAD_STORAGE_PATH=5
+MCP_REMOTE_UPLOAD_CREATED=2026-01-20
+MCP_REMOTE_UPLOAD_NOTES=Uploaded via system test
+```
+
+Optional create lookup test variables (write operation; opt-in required):
+
+```bash
+MCP_REMOTE_CREATE_LOOKUP_ALLOW=1
+MCP_REMOTE_CREATE_LOOKUP_TYPE=tag
+MCP_REMOTE_CREATE_LOOKUP_NAME=Invoices
+# Or pass raw JSON:
+# MCP_REMOTE_CREATE_LOOKUP_DATA={"name":"Invoices"}
+```
+
 ## Docker (LAN deployment)
 
 Build the image:
@@ -124,14 +152,85 @@ docker compose up --build
 - Supported search filters: `tag_id`, `correspondent_id`, `document_type_id`, `created_from`, `created_to`.
 - Use `custom_filters` to pass raw Paperless filter keys when needed (example: `storage_path__id`).
 - The search tool returns compact document summaries (id, title, timestamps, type/correspondent/tags, file name).
+- Upload metadata is sent as multipart form fields; lists become repeated keys, dicts are JSON-encoded.
+- `update_document` uses PATCH to send only the fields you want to change.
 - Lookup tools are cached in-memory for `MCP_LOOKUP_CACHE_TTL_SECONDS` (set to `0` to disable).
 - Pass `refresh=true` to `list_lookups` to bypass cache for that call.
 - `list_lookups` accepts `include` to limit which lookups are returned.
 - `fields` lets you return only specific keys from each lookup item (omit to get full objects).
+- `create_lookup` accepts singular aliases like `tag` or `document_type`.
+- `create_lookup` supports `parent_id` for tags, and optional `match`/`matching_algorithm` for auto-matching.
+- `auto_match` defaults to true and will set `matching_algorithm=auto` for lookups that support matching.
+- Use `permissions` to pass a list of user IDs, or leave it empty/omit to use Paperless defaults.
+
+## Use cases
+
+- **Connectivity check:** verify the MCP server is reachable.
+  ```bash
+  python mcp_client.py healthcheck
+  ```
+- **Search documents:** query text or filter by tags, correspondents, document type, dates.
+  ```bash
+  python mcp_client.py search --query "invoice" --page-size 5
+  python mcp_client.py search --query "" --tag-id 12 --created-from 2026-01-01
+  ```
+- **Get a document by ID:** fetch the full Paperless document JSON.
+  ```bash
+  python mcp_client.py get-document --document-id 123
+  ```
+- **List lookups:** fetch tags, document types, correspondents, storage paths, custom fields.
+  ```bash
+  python mcp_client.py list-lookups --include tags,document_types --fields id,name
+  ```
+- **Upload documents:** send a file plus metadata.
+  ```bash
+  python mcp_client.py upload --file-path /path/to/invoice.pdf \
+    --metadata '{"title":"Invoice 2026-01","tags":[1,2],"document_type":3}'
+  ```
+- **Update document metadata:** patch a document without re-uploading.
+  ```bash
+  python mcp_client.py update-document --document-id 123 \
+    --updates '{"title":"Invoice 2026-01 (Reviewed)","tags":[10,12]}'
+  ```
+- **Create lookup values:** tags, document types, correspondents, storage paths, custom fields.
+  ```bash
+  python mcp_client.py create-lookup --lookup-type tag --data '{"name":"Invoices"}'
+  python mcp_client.py create-lookup --lookup-type tag --data '{"name":"Invoices - 2026"}' \
+    --parent-id 12 --match "invoice" --permissions '[]'
+  python mcp_client.py create-lookup --lookup-type document_type --data '{"name":"Receipt"}' \
+    --matching-algorithm regex --match "receipt"
+  ```
+- **Custom tool call:** call any tool with raw JSON args.
+  ```bash
+  python mcp_client.py call --name list_lookups --args '{"include":["tags"]}'
+  ```
+
+Tip: for long JSON, you can pass `@path/to/file.json` instead of inline JSON.
 
 ## Examples
 
 See `examples/lookup_calls.txt`.
+See `examples/get_document.txt` for a get document example.
+See `examples/upload_document.txt` for an upload example.
+See `examples/update_document.txt` for a document update example.
+See `examples/create_lookup.txt` for lookup creation examples.
+
+## Test client
+
+Use `mcp_client.py` to call tools over Streamable HTTP.
+
+```bash
+python mcp_client.py healthcheck
+python mcp_client.py search --query invoice --page-size 1
+python mcp_client.py get-document --document-id 123
+python mcp_client.py list-lookups --include tags,document_types
+python mcp_client.py upload --file-path /path/to/invoice.pdf \
+  --metadata '{"title":"Invoice 2026-01","tags":[1,2],"document_type":3}'
+python mcp_client.py update-document --document-id 123 --updates '{"title":"Updated"}'
+python mcp_client.py create-lookup --lookup-type tag --data '{"name":"Invoices"}'
+python mcp_client.py create-lookup --lookup-type tag --data '{"name":"Invoices - 2026"}' \
+  --parent-id 12 --match "invoice" --permissions '[]'
+```
 
 ## License
 

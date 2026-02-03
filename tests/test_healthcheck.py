@@ -1,3 +1,5 @@
+import json
+
 import mcp_paperless_ngx.server as server
 
 
@@ -273,3 +275,363 @@ def test_list_lookups_refresh_bypasses_cache(monkeypatch) -> None:
     result = server.list_lookups(include=["tags"], refresh=True)
 
     assert result["tags"][0]["id"] == 1
+
+
+def test_create_lookup_posts_payload(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    payload = {"id": 99, "name": "Invoices"}
+    auto_value = server.MATCHING_ALGORITHM_MAP["auto"]
+
+    class _CreateClient:
+        def __init__(self, payload: dict[str, object], captured: dict[str, object]) -> None:
+            self._payload = payload
+            self._captured = captured
+
+        def __enter__(self) -> "_CreateClient":
+            return self
+
+        def __exit__(self, *_: object) -> bool:
+            return False
+
+        def post(self, url: str, *, headers: dict[str, str], json: dict[str, object]) -> _DummyResponse:
+            self._captured["url"] = url
+            self._captured["headers"] = headers
+            self._captured["json"] = json
+            return _DummyResponse(self._payload)
+
+    def fake_client(*, timeout: float, verify: bool | str) -> _CreateClient:
+        return _CreateClient(payload, captured)
+
+    monkeypatch.setattr(server.httpx, "Client", fake_client)
+    monkeypatch.setenv("PAPERLESS_URL", "http://localhost:8000")
+    monkeypatch.setenv("PAPERLESS_TOKEN", "test-token")
+    monkeypatch.setenv("PAPERLESS_VERIFY_SSL", "false")
+    monkeypatch.setenv("MCP_LOG_LEVEL", "INFO")
+
+    result = server.create_lookup("tags", {"name": "Invoices"})
+
+    assert result["id"] == 99
+    assert captured["url"] == "http://localhost:8000/api/tags/"
+    assert captured["json"] == {"name": "Invoices", "matching_algorithm": auto_value}
+
+
+def test_create_lookup_accepts_alias(monkeypatch) -> None:
+    payload = {"id": 5, "name": "Receipt"}
+
+    class _CreateClient:
+        def __init__(self, payload: dict[str, object]) -> None:
+            self._payload = payload
+
+        def __enter__(self) -> "_CreateClient":
+            return self
+
+        def __exit__(self, *_: object) -> bool:
+            return False
+
+        def post(self, url: str, *, headers: dict[str, str], json: dict[str, object]) -> _DummyResponse:
+            assert url.endswith("/api/document_types/")
+            return _DummyResponse(self._payload)
+
+    def fake_client(*, timeout: float, verify: bool | str) -> _CreateClient:
+        return _CreateClient(payload)
+
+    monkeypatch.setattr(server.httpx, "Client", fake_client)
+    monkeypatch.setenv("PAPERLESS_URL", "http://localhost:8000")
+    monkeypatch.setenv("PAPERLESS_TOKEN", "test-token")
+    monkeypatch.setenv("PAPERLESS_VERIFY_SSL", "false")
+    monkeypatch.setenv("MCP_LOG_LEVEL", "INFO")
+
+    result = server.create_lookup("document_type", {"name": "Receipt"})
+
+    assert result["id"] == 5
+
+
+def test_create_lookup_sets_parent_tag(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    payload = {"id": 7, "name": "Parented"}
+
+    class _CreateClient:
+        def __init__(self, payload: dict[str, object], captured: dict[str, object]) -> None:
+            self._payload = payload
+            self._captured = captured
+
+        def __enter__(self) -> "_CreateClient":
+            return self
+
+        def __exit__(self, *_: object) -> bool:
+            return False
+
+        def post(self, url: str, *, headers: dict[str, str], json: dict[str, object]) -> _DummyResponse:
+            self._captured["json"] = json
+            return _DummyResponse(self._payload)
+
+    def fake_client(*, timeout: float, verify: bool | str) -> _CreateClient:
+        return _CreateClient(payload, captured)
+
+    monkeypatch.setattr(server.httpx, "Client", fake_client)
+    monkeypatch.setenv("PAPERLESS_URL", "http://localhost:8000")
+    monkeypatch.setenv("PAPERLESS_TOKEN", "test-token")
+    monkeypatch.setenv("PAPERLESS_VERIFY_SSL", "false")
+    monkeypatch.setenv("MCP_LOG_LEVEL", "INFO")
+
+    _ = server.create_lookup("tags", {"name": "Child"}, parent_id=42)
+
+    assert captured["json"]["parent"] == 42
+
+
+def test_create_lookup_disable_auto_match(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    payload = {"id": 8, "name": "Manual"}
+
+    class _CreateClient:
+        def __init__(self, payload: dict[str, object], captured: dict[str, object]) -> None:
+            self._payload = payload
+            self._captured = captured
+
+        def __enter__(self) -> "_CreateClient":
+            return self
+
+        def __exit__(self, *_: object) -> bool:
+            return False
+
+        def post(self, url: str, *, headers: dict[str, str], json: dict[str, object]) -> _DummyResponse:
+            self._captured["json"] = json
+            return _DummyResponse(self._payload)
+
+    def fake_client(*, timeout: float, verify: bool | str) -> _CreateClient:
+        return _CreateClient(payload, captured)
+
+    monkeypatch.setattr(server.httpx, "Client", fake_client)
+    monkeypatch.setenv("PAPERLESS_URL", "http://localhost:8000")
+    monkeypatch.setenv("PAPERLESS_TOKEN", "test-token")
+    monkeypatch.setenv("PAPERLESS_VERIFY_SSL", "false")
+    monkeypatch.setenv("MCP_LOG_LEVEL", "INFO")
+
+    _ = server.create_lookup("tags", {"name": "Manual"}, auto_match=False)
+
+    assert "matching_algorithm" not in captured["json"]
+
+
+def test_create_lookup_normalizes_matching_algorithm(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    payload = {"id": 9, "name": "Regex"}
+
+    class _CreateClient:
+        def __init__(self, payload: dict[str, object], captured: dict[str, object]) -> None:
+            self._payload = payload
+            self._captured = captured
+
+        def __enter__(self) -> "_CreateClient":
+            return self
+
+        def __exit__(self, *_: object) -> bool:
+            return False
+
+        def post(self, url: str, *, headers: dict[str, str], json: dict[str, object]) -> _DummyResponse:
+            self._captured["json"] = json
+            return _DummyResponse(self._payload)
+
+    def fake_client(*, timeout: float, verify: bool | str) -> _CreateClient:
+        return _CreateClient(payload, captured)
+
+    monkeypatch.setattr(server.httpx, "Client", fake_client)
+    monkeypatch.setenv("PAPERLESS_URL", "http://localhost:8000")
+    monkeypatch.setenv("PAPERLESS_TOKEN", "test-token")
+    monkeypatch.setenv("PAPERLESS_VERIFY_SSL", "false")
+    monkeypatch.setenv("MCP_LOG_LEVEL", "INFO")
+
+    _ = server.create_lookup(
+        "tags",
+        {"name": "Regex"},
+        match="INV-.*",
+        matching_algorithm="regex",
+    )
+
+    assert captured["json"]["matching_algorithm"] == server.MATCHING_ALGORITHM_MAP["regex"]
+
+
+def test_create_lookup_includes_permissions(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    payload = {"id": 10, "name": "Permitted"}
+
+    class _CreateClient:
+        def __init__(self, payload: dict[str, object], captured: dict[str, object]) -> None:
+            self._payload = payload
+            self._captured = captured
+
+        def __enter__(self) -> "_CreateClient":
+            return self
+
+        def __exit__(self, *_: object) -> bool:
+            return False
+
+        def post(self, url: str, *, headers: dict[str, str], json: dict[str, object]) -> _DummyResponse:
+            self._captured["json"] = json
+            return _DummyResponse(self._payload)
+
+    def fake_client(*, timeout: float, verify: bool | str) -> _CreateClient:
+        return _CreateClient(payload, captured)
+
+    monkeypatch.setattr(server.httpx, "Client", fake_client)
+    monkeypatch.setenv("PAPERLESS_URL", "http://localhost:8000")
+    monkeypatch.setenv("PAPERLESS_TOKEN", "test-token")
+    monkeypatch.setenv("PAPERLESS_VERIFY_SSL", "false")
+    monkeypatch.setenv("MCP_LOG_LEVEL", "INFO")
+
+    _ = server.create_lookup("tags", {"name": "Permitted"}, permissions=[])
+
+    assert captured["json"]["permissions"] == []
+
+
+def test_create_lookup_invalid_type() -> None:
+    result = server.create_lookup("", {"name": "Bad"})
+    assert result["error"] == "invalid_request"
+
+
+def test_create_lookup_missing_data() -> None:
+    result = server.create_lookup("tags", {})
+    assert result["error"] == "invalid_request"
+
+
+def test_upload_document_sends_file_and_metadata(monkeypatch, tmp_path) -> None:
+    captured: dict[str, object] = {}
+    payload = {"task_id": "abc123"}
+
+    class _UploadClient:
+        def __init__(self, payload: dict[str, object], captured: dict[str, object]) -> None:
+            self._payload = payload
+            self._captured = captured
+
+        def __enter__(self) -> "_UploadClient":
+            return self
+
+        def __exit__(self, *_: object) -> bool:
+            return False
+
+        def post(
+            self,
+            url: str,
+            *,
+            headers: dict[str, str],
+            data: list[tuple[str, str]],
+            files: dict[str, tuple[str, object, str]],
+        ) -> _DummyResponse:
+            self._captured["url"] = url
+            self._captured["headers"] = headers
+            self._captured["data"] = data
+            self._captured["files"] = files
+            return _DummyResponse(self._payload)
+
+    def fake_client(*, timeout: float, verify: bool | str) -> _UploadClient:
+        return _UploadClient(payload, captured)
+
+    monkeypatch.setattr(server.httpx, "Client", fake_client)
+    monkeypatch.setenv("PAPERLESS_URL", "http://localhost:8000")
+    monkeypatch.setenv("PAPERLESS_TOKEN", "test-token")
+    monkeypatch.setenv("PAPERLESS_VERIFY_SSL", "false")
+    monkeypatch.setenv("MCP_LOG_LEVEL", "INFO")
+
+    file_path = tmp_path / "invoice.pdf"
+    file_path.write_bytes(b"test-content")
+
+    result = server.upload_document(
+        file_path=str(file_path),
+        metadata={"title": "Invoice", "tags": [1, 2], "custom": {"foo": "bar"}},
+        filename="upload.pdf",
+    )
+
+    assert result["task_id"] == "abc123"
+    assert captured["url"] == "http://localhost:8000/api/documents/post_document/"
+    assert captured["headers"]["Authorization"] == "Token test-token"
+
+    data = captured["data"]
+    assert ("title", "Invoice") in data
+    assert ("tags", "1") in data
+    assert ("tags", "2") in data
+    custom_values = [value for key, value in data if key == "custom"]
+    assert custom_values
+    assert json.loads(custom_values[0]) == {"foo": "bar"}
+
+    files = captured["files"]["document"]
+    assert files[0] == "upload.pdf"
+    assert files[2] == "application/octet-stream"
+
+
+def test_upload_document_missing_file() -> None:
+    result = server.upload_document(file_path="/no/such/file.pdf")
+    assert result["error"] == "file_not_found"
+
+
+def test_get_document_calls_endpoint(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    payload = {"id": 321, "title": "Fetched"}
+
+    class _GetClient:
+        def __init__(self, payload: dict[str, object], captured: dict[str, object]) -> None:
+            self._payload = payload
+            self._captured = captured
+
+        def __enter__(self) -> "_GetClient":
+            return self
+
+        def __exit__(self, *_: object) -> bool:
+            return False
+
+        def get(self, url: str, *, headers: dict[str, str]) -> _DummyResponse:
+            self._captured["url"] = url
+            self._captured["headers"] = headers
+            return _DummyResponse(self._payload)
+
+    def fake_client(*, timeout: float, verify: bool | str) -> _GetClient:
+        return _GetClient(payload, captured)
+
+    monkeypatch.setattr(server.httpx, "Client", fake_client)
+    monkeypatch.setenv("PAPERLESS_URL", "http://localhost:8000")
+    monkeypatch.setenv("PAPERLESS_TOKEN", "test-token")
+    monkeypatch.setenv("PAPERLESS_VERIFY_SSL", "false")
+    monkeypatch.setenv("MCP_LOG_LEVEL", "INFO")
+
+    result = server.get_document(321)
+
+    assert result["id"] == 321
+    assert captured["url"] == "http://localhost:8000/api/documents/321/"
+
+
+def test_update_document_patches_payload(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    payload = {"id": 123, "title": "Updated"}
+
+    class _UpdateClient:
+        def __init__(self, payload: dict[str, object], captured: dict[str, object]) -> None:
+            self._payload = payload
+            self._captured = captured
+
+        def __enter__(self) -> "_UpdateClient":
+            return self
+
+        def __exit__(self, *_: object) -> bool:
+            return False
+
+        def patch(self, url: str, *, headers: dict[str, str], json: dict[str, object]) -> _DummyResponse:
+            self._captured["url"] = url
+            self._captured["headers"] = headers
+            self._captured["json"] = json
+            return _DummyResponse(self._payload)
+
+    def fake_client(*, timeout: float, verify: bool | str) -> _UpdateClient:
+        return _UpdateClient(payload, captured)
+
+    monkeypatch.setattr(server.httpx, "Client", fake_client)
+    monkeypatch.setenv("PAPERLESS_URL", "http://localhost:8000")
+    monkeypatch.setenv("PAPERLESS_TOKEN", "test-token")
+    monkeypatch.setenv("PAPERLESS_VERIFY_SSL", "false")
+    monkeypatch.setenv("MCP_LOG_LEVEL", "INFO")
+
+    result = server.update_document(
+        document_id=123,
+        updates={"title": "Updated", "tags": [1, 2], "correspondent": None},
+    )
+
+    assert result["id"] == 123
+    assert captured["url"] == "http://localhost:8000/api/documents/123/"
+    assert captured["json"] == {"title": "Updated", "tags": [1, 2], "correspondent": None}

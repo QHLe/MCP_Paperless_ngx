@@ -1,0 +1,19 @@
+create_lookup(
+  lookup_type="tag",
+  data={"name": "Invoices"},
+)
+
+create_lookup(
+  lookup_type="tag",
+  data={"name": "Invoices - 2026"},
+  parent_id=12,
+  match="invoice",
+  permissions=[],
+)
+
+create_lookup(
+  lookup_type="document_type",
+  data={"name": "Receipt"},
+  match="receipt",
+  matching_algorithm="regex",
+)
