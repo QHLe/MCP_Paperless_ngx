@@ -1,0 +1,4 @@
+list_lookups()
+list_lookups(include=["tags","document_types"])
+list_lookups(include=["tags","document_types"], refresh=true)
+list_lookups(fields=["id","name"])

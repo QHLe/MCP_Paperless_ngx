@@ -6,6 +6,7 @@ This repository starts with a minimal MCP (Model Context Protocol) server scaffo
 
 - `healthcheck()` -> returns `ok`
 - `search_documents(...)` -> searches documents in Paperless with optional filters
+- `list_lookups(include=None, fields=None, refresh=false)` -> returns tags, document types, correspondents, storage paths, and custom fields
 
 ## Requirements
 
@@ -34,6 +35,7 @@ MCP_TRANSPORT=streamable-http
 MCP_HOST=127.0.0.1
 MCP_PORT=8001
 MCP_MOUNT_PATH=/
+MCP_LOOKUP_CACHE_TTL_SECONDS=300
 ```
 
 For an HTTPS Paperless server:
@@ -49,6 +51,7 @@ MCP_TRANSPORT=streamable-http
 MCP_HOST=127.0.0.1
 MCP_PORT=8001
 MCP_MOUNT_PATH=/
+MCP_LOOKUP_CACHE_TTL_SECONDS=300
 ```
 
 ## Run
@@ -73,6 +76,14 @@ Optional search test variables:
 ```bash
 MCP_REMOTE_SEARCH_QUERY=invoice
 MCP_REMOTE_SEARCH_PAGE_SIZE=1
+```
+
+Optional lookup test variables:
+
+```bash
+MCP_REMOTE_LOOKUPS_INCLUDE=tags,document_types
+MCP_REMOTE_LOOKUPS_FIELDS=id,name
+MCP_REMOTE_LOOKUPS_REFRESH=true
 ```
 
 ## Docker (LAN deployment)
@@ -113,6 +124,14 @@ docker compose up --build
 - Supported search filters: `tag_id`, `correspondent_id`, `document_type_id`, `created_from`, `created_to`.
 - Use `custom_filters` to pass raw Paperless filter keys when needed (example: `storage_path__id`).
 - The search tool returns compact document summaries (id, title, timestamps, type/correspondent/tags, file name).
+- Lookup tools are cached in-memory for `MCP_LOOKUP_CACHE_TTL_SECONDS` (set to `0` to disable).
+- Pass `refresh=true` to `list_lookups` to bypass cache for that call.
+- `list_lookups` accepts `include` to limit which lookups are returned.
+- `fields` lets you return only specific keys from each lookup item (omit to get full objects).
+
+## Examples
+
+See `examples/lookup_calls.txt`.
 
 ## License
 

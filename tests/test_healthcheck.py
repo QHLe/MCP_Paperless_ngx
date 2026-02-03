@@ -18,6 +18,7 @@ class _DummyClient:
     def __init__(self, payload: dict[str, object], captured: dict[str, object]) -> None:
         self._payload = payload
         self._captured = captured
+        self._calls = 0
 
     def __enter__(self) -> "_DummyClient":
         return self
@@ -29,6 +30,10 @@ class _DummyClient:
         self._captured["url"] = url
         self._captured["headers"] = headers
         self._captured["params"] = params
+        self._calls += 1
+        if self._calls == 1:
+            return _DummyResponse(self._payload)
+        return _DummyResponse({"count": 0, "next": None, "previous": None, "results": []})
         return _DummyResponse(self._payload)
 
 
@@ -152,3 +157,119 @@ def test_search_documents_requires_token(monkeypatch) -> None:
 def test_resolve_log_level_defaults_to_info() -> None:
     assert server._resolve_log_level("DEBUG") == server.logging.DEBUG
     assert server._resolve_log_level("not-a-level") == server.logging.INFO
+
+
+def test_list_lookups_returns_combined(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    payload = {
+        "count": 1,
+        "next": None,
+        "previous": None,
+        "results": [{"id": 1, "name": "Sample"}],
+    }
+
+    def fake_client(*, timeout: float, verify: bool | str) -> _DummyClient:
+        return _DummyClient(payload, captured)
+
+    monkeypatch.setattr(server.httpx, "Client", fake_client)
+    monkeypatch.setenv("PAPERLESS_URL", "http://localhost:8000")
+    monkeypatch.setenv("PAPERLESS_TOKEN", "test-token")
+    monkeypatch.setenv("PAPERLESS_VERIFY_SSL", "false")
+    monkeypatch.setenv("MCP_LOG_LEVEL", "INFO")
+    monkeypatch.setenv("MCP_LOOKUP_CACHE_TTL_SECONDS", "0")
+
+    result = server.list_lookups()
+
+    assert "tags" in result
+    assert "document_types" in result
+    assert "correspondents" in result
+    assert "storage_paths" in result
+    assert "custom_fields" in result
+    assert result["counts"]["tags"] == 1
+
+
+def test_list_lookups_include_filters(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    payload = {
+        "count": 1,
+        "next": None,
+        "previous": None,
+        "results": [{"id": 1, "name": "Sample"}],
+    }
+
+    def fake_client(*, timeout: float, verify: bool | str) -> _DummyClient:
+        return _DummyClient(payload, captured)
+
+    monkeypatch.setattr(server.httpx, "Client", fake_client)
+    monkeypatch.setenv("PAPERLESS_URL", "http://localhost:8000")
+    monkeypatch.setenv("PAPERLESS_TOKEN", "test-token")
+    monkeypatch.setenv("PAPERLESS_VERIFY_SSL", "false")
+    monkeypatch.setenv("MCP_LOG_LEVEL", "INFO")
+    monkeypatch.setenv("MCP_LOOKUP_CACHE_TTL_SECONDS", "0")
+
+    result = server.list_lookups(include=["tags", "document_types"])
+
+    assert "tags" in result
+    assert "document_types" in result
+    assert "correspondents" not in result
+
+
+def test_list_lookups_fields_filter(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    payload = {
+        "count": 1,
+        "next": None,
+        "previous": None,
+        "results": [{"id": 1, "name": "Sample", "slug": "sample"}],
+    }
+
+    def fake_client(*, timeout: float, verify: bool | str) -> _DummyClient:
+        return _DummyClient(payload, captured)
+
+    monkeypatch.setattr(server.httpx, "Client", fake_client)
+    monkeypatch.setenv("PAPERLESS_URL", "http://localhost:8000")
+    monkeypatch.setenv("PAPERLESS_TOKEN", "test-token")
+    monkeypatch.setenv("PAPERLESS_VERIFY_SSL", "false")
+    monkeypatch.setenv("MCP_LOG_LEVEL", "INFO")
+    monkeypatch.setenv("MCP_LOOKUP_CACHE_TTL_SECONDS", "0")
+
+    result = server.list_lookups(fields=["id", "name"])
+
+    assert result["tags"][0] == {"id": 1, "name": "Sample"}
+
+
+def test_list_lookups_invalid_include(monkeypatch) -> None:
+    monkeypatch.setenv("PAPERLESS_URL", "http://localhost:8000")
+    monkeypatch.setenv("PAPERLESS_TOKEN", "test-token")
+    monkeypatch.setenv("PAPERLESS_VERIFY_SSL", "false")
+    monkeypatch.setenv("MCP_LOG_LEVEL", "INFO")
+
+    result = server.list_lookups(include=["not-a-real-type"])
+
+    assert result["error"] == "invalid_request"
+
+
+def test_list_lookups_refresh_bypasses_cache(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    payload = {
+        "count": 1,
+        "next": None,
+        "previous": None,
+        "results": [{"id": 1, "name": "Fresh"}],
+    }
+
+    def fake_client(*, timeout: float, verify: bool | str) -> _DummyClient:
+        return _DummyClient(payload, captured)
+
+    monkeypatch.setattr(server.httpx, "Client", fake_client)
+    monkeypatch.setenv("PAPERLESS_URL", "http://localhost:8000")
+    monkeypatch.setenv("PAPERLESS_TOKEN", "test-token")
+    monkeypatch.setenv("PAPERLESS_VERIFY_SSL", "false")
+    monkeypatch.setenv("MCP_LOG_LEVEL", "INFO")
+    monkeypatch.setenv("MCP_LOOKUP_CACHE_TTL_SECONDS", "300")
+
+    server._LOOKUP_CACHE["tags"] = (server.time.time(), [{"id": 99, "name": "Cached"}])
+
+    result = server.list_lookups(include=["tags"], refresh=True)
+
+    assert result["tags"][0]["id"] == 1

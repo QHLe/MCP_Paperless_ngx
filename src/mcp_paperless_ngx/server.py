@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import Any
 
 import httpx
@@ -14,9 +15,20 @@ DEFAULT_PAGE_SIZE = 25
 MAX_PAGE_SIZE = 100
 DEFAULT_LOG_LEVEL = "INFO"
 DEFAULT_TRANSPORT = "stdio"
+DEFAULT_LOOKUP_CACHE_TTL_SECONDS = 300.0
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s - %(message)s"
 
 logger = logging.getLogger("mcp_paperless_ngx")
+
+LOOKUP_ENDPOINTS = {
+    "tags": "/api/tags/",
+    "document_types": "/api/document_types/",
+    "correspondents": "/api/correspondents/",
+    "storage_paths": "/api/storage_paths/",
+    "custom_fields": "/api/custom_fields/",
+}
+
+_LOOKUP_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
 
 def _read_env(name: str, *, default: str | None = None, required: bool = False) -> str:
@@ -40,6 +52,16 @@ def _read_env_int(name: str, *, default: int) -> int:
         return int(raw_value)
     except ValueError as exc:
         raise ValueError(f"{name} must be an integer.") from exc
+
+
+def _read_env_float(name: str, *, default: float) -> float:
+    raw_value = os.getenv(name)
+    if raw_value is None or not raw_value.strip():
+        return default
+    try:
+        return float(raw_value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number.") from exc
 
 
 def _resolve_log_level(level_name: str) -> int:
@@ -115,6 +137,144 @@ def _normalize_page_size(page_size: int) -> int:
     if page_size < 1:
         return DEFAULT_PAGE_SIZE
     return min(page_size, MAX_PAGE_SIZE)
+
+
+def _lookup_cache_ttl_seconds() -> float:
+    ttl = _read_env_float("MCP_LOOKUP_CACHE_TTL_SECONDS", default=DEFAULT_LOOKUP_CACHE_TTL_SECONDS)
+    if ttl < 0:
+        raise ValueError("MCP_LOOKUP_CACHE_TTL_SECONDS must be zero or greater.")
+    return ttl
+
+
+def _normalize_fields(fields: list[str] | None) -> list[str] | None:
+    if not fields:
+        return None
+    cleaned = [field.strip() for field in fields if field and field.strip()]
+    return cleaned or None
+
+
+def _filter_fields(items: list[dict[str, Any]], fields: list[str] | None) -> list[dict[str, Any]]:
+    normalized = _normalize_fields(fields)
+    if normalized is None:
+        return items
+    filtered_items: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        filtered_items.append({key: item.get(key) for key in normalized})
+    return filtered_items
+
+
+def _get_cached_lookup(name: str) -> list[dict[str, Any]] | None:
+    ttl = _lookup_cache_ttl_seconds()
+    if ttl == 0:
+        return None
+    cached = _LOOKUP_CACHE.get(name)
+    if not cached:
+        return None
+    cached_at, data = cached
+    if time.time() - cached_at > ttl:
+        _LOOKUP_CACHE.pop(name, None)
+        return None
+    return data
+
+
+def _set_cached_lookup(name: str, data: list[dict[str, Any]]) -> None:
+    ttl = _lookup_cache_ttl_seconds()
+    if ttl == 0:
+        return
+    _LOOKUP_CACHE[name] = (time.time(), data)
+
+
+def _fetch_paginated(
+    client: httpx.Client,
+    base_url: str,
+    headers: dict[str, str],
+    endpoint: str,
+    label: str,
+) -> tuple[list[dict[str, Any]] | None, dict[str, Any] | None]:
+    results: list[dict[str, Any]] = []
+    page = 1
+
+    while True:
+        try:
+            response = client.get(
+                f"{base_url}{endpoint}",
+                headers=headers,
+                params={"page": page, "page_size": MAX_PAGE_SIZE},
+            )
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            return (
+                None,
+                {
+                    "error": "paperless_http_error",
+                    "status_code": exc.response.status_code,
+                    "message": exc.response.text[:500],
+                },
+            )
+        except httpx.RequestError as exc:
+            return None, {"error": "paperless_request_error", "message": str(exc)}
+
+        try:
+            payload = response.json()
+        except ValueError:
+            return None, {
+                "error": "unexpected_response",
+                "message": f"{label} returned invalid JSON.",
+            }
+
+        if not isinstance(payload, dict):
+            return None, {
+                "error": "unexpected_response",
+                "message": f"{label} returned non-object JSON.",
+            }
+
+        page_results = payload.get("results")
+        if not isinstance(page_results, list):
+            return None, {
+                "error": "unexpected_response",
+                "message": f"{label} response missing results list.",
+            }
+
+        for item in page_results:
+            if isinstance(item, dict):
+                results.append(item)
+
+        if not payload.get("next"):
+            break
+        page += 1
+
+    return results, None
+
+
+def _fetch_lookup(
+    name: str,
+    endpoint: str,
+    client: httpx.Client,
+    base_url: str,
+    headers: dict[str, str],
+    *,
+    refresh: bool,
+) -> tuple[list[dict[str, Any]] | None, dict[str, Any] | None, bool]:
+    if not refresh:
+        try:
+            cached = _get_cached_lookup(name)
+        except ValueError as exc:
+            return None, {"error": "config_error", "message": str(exc)}, False
+
+        if cached is not None:
+            return cached, None, True
+
+    data, error = _fetch_paginated(client, base_url, headers, endpoint, name)
+    if error:
+        return None, error, False
+
+    try:
+        _set_cached_lookup(name, data or [])
+    except ValueError as exc:
+        return data, {"error": "config_error", "message": str(exc)}, False
+    return data, None, False
 
 
 def _build_search_params(
@@ -317,6 +477,70 @@ def search_documents(
             if isinstance(document, dict)
         ],
     }
+
+
+@mcp.tool()
+def list_lookups(
+    refresh: bool = False,
+    include: list[str] | None = None,
+    fields: list[str] | None = None,
+) -> dict[str, Any]:
+    """Return tags, document types, correspondents, storage paths, and custom fields."""
+    _configure_logging()
+    try:
+        base_url = _paperless_base_url()
+        timeout_seconds = _paperless_timeout_seconds()
+        verify_setting = _paperless_verify_setting()
+        headers = _paperless_headers()
+    except ValueError as exc:
+        logger.error("Configuration error in list_lookups: %s", exc)
+        return {"error": "config_error", "message": str(exc)}
+
+    ordered_names = list(LOOKUP_ENDPOINTS.keys())
+    if include is None:
+        selected_names = ordered_names
+    else:
+        include_clean = {item.strip() for item in include if item and item.strip()}
+        if not include_clean:
+            selected_names = ordered_names
+        else:
+            invalid = sorted(name for name in include_clean if name not in LOOKUP_ENDPOINTS)
+            if invalid:
+                return {
+                    "error": "invalid_request",
+                    "message": f"Unknown lookup types: {', '.join(invalid)}",
+                    "allowed": ordered_names,
+                }
+            selected_names = [name for name in ordered_names if name in include_clean]
+
+    data: dict[str, Any] = {}
+    counts: dict[str, int] = {}
+    errors: dict[str, Any] = {}
+
+    with httpx.Client(timeout=timeout_seconds, verify=verify_setting) as client:
+        for name in selected_names:
+            endpoint = LOOKUP_ENDPOINTS[name]
+            results, error, cache_hit = _fetch_lookup(
+                name,
+                endpoint,
+                client,
+                base_url,
+                headers,
+                refresh=refresh,
+            )
+            if error:
+                errors[name] = error
+                logger.error("list_lookups failed for %s: %s", name, error)
+                continue
+            data[name] = _filter_fields(results or [], fields)
+            counts[name] = len(results or [])
+            logger.info("list_lookups %s cache_hit=%s count=%s", name, cache_hit, len(results or []))
+
+    data["counts"] = counts
+    if errors:
+        data["errors"] = errors
+
+    return data
 
 
 def main() -> None:
