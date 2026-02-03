@@ -1,3 +1,0 @@
-get_document(
-  document_id=123,
-)

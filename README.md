@@ -207,14 +207,6 @@ docker compose up --build
 
 Tip: for long JSON, you can pass `@path/to/file.json` instead of inline JSON.
 
-## Examples
-
-See `examples/lookup_calls.txt`.
-See `examples/get_document.txt` for a get document example.
-See `examples/upload_document.txt` for an upload example.
-See `examples/update_document.txt` for a document update example.
-See `examples/create_lookup.txt` for lookup creation examples.
-
 ## Test client
 
 Use `mcp_client.py` to call tools over Streamable HTTP.

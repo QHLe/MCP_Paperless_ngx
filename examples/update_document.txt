@@ -1,9 +1,0 @@
-update_document(
-  document_id=123,
-  updates={
-    "title": "Invoice 2026-01 (Reviewed)",
-    "tags": [10, 12],
-    "document_type": 3,
-    "correspondent": None,
-  },
-)
